@@ -1,16 +1,23 @@
-use core::panic;
-use image::{
-    DynamicImage, GenericImage, GenericImageView, ImageBuffer, ImageReader, Rgba, RgbaImage,
-};
-use std::{fs, iter::zip};
-
 use clap::Parser;
+use core::panic;
+use image::{DynamicImage, GenericImage, GenericImageView, ImageReader, RgbaImage};
+use itertools::Itertools;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::io::Write;
+use std::usize;
+use std::{fs, iter::zip};
+use texture_packer::exporter::ImageExporter;
+use texture_packer::{TexturePacker, TexturePackerConfig};
 
 #[derive(Parser)]
 struct Cli {
     folder_path: std::path::PathBuf,
+    #[arg(default_value = "./")]
+    output_path: std::path::PathBuf,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rect {
     x: u32,
     y: u32,
@@ -22,12 +29,38 @@ impl Rect {
         return x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height;
     }
 }
+impl Display for Rect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{{\n\"x\": {},\n\"y\": {},\n\"width\": {},\n\"height\": {}\n}}",
+            self.x, self.y, self.width, self.height
+        )
+    }
+}
 #[derive(Debug)]
 struct FrameData {
     image: DynamicImage,
     offset: (u32, u32),
     frame_time: u32,
     cleanup_rect: Option<Rect>,
+}
+#[derive(Debug)]
+struct EncodedFrameData {
+    location: Rect,
+    offset: (u32, u32),
+    frame_time: u32,
+    cleanup_rect: Option<Rect>,
+}
+impl Display for EncodedFrameData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (x, y) = self.offset;
+        let ster = match self.cleanup_rect {
+            Some(rect) => rect.to_string(),
+            None => "null".to_string(),
+        };
+        write!(f, "{{\n\"location\": {},\n\"position\": {{\n\"x\": {}\n, \"y\": {}\n}},\n\"duration\": {},\n\"clear_rect\":{}\n}}", self.location, x, y, self.frame_time, ster)
+    }
 }
 fn generate_frame(
     image1: &DynamicImage,
@@ -69,8 +102,8 @@ fn get_bounding_rect(image: &DynamicImage) -> Rect {
     let mut out_rect: Rect = Rect {
         x: 0,
         y: 0,
-        width: 1,
-        height: 1,
+        width: 0,
+        height: 0,
     };
     // left
     'outer: for x in 0..image.width() {
@@ -139,21 +172,122 @@ fn process_folder(path: std::path::PathBuf) -> Vec<FrameData> {
                 image: save_img.crop_imm(rect.x, rect.y, rect.width, rect.height),
                 offset: (rect.x, rect.y),
                 frame_time: 1,
-                cleanup_rect: Some(clear_rect),
+                cleanup_rect: if clear_rect == (Rect{x: 0, y: 0, width: 0, height: 0}){ None } else {Some(clear_rect)},
             });
             rendered_frames = fr;
         }
     }
     return out;
 }
-fn pack_animations() {}
+
+fn pack_animations(
+    animations: HashMap<String, Vec<FrameData>>,
+) -> (DynamicImage, HashMap<String, Vec<EncodedFrameData>>) {
+    let mut unique_images: Vec<(usize, &String)> = Vec::new();
+    let mut skipped_frames: Vec<(usize, usize, &String)> = Vec::new();
+    let mut out: HashMap<String, Vec<EncodedFrameData>> = HashMap::new();
+    let mut dimensions: u32 = 0;
+    for (animation_name, frames) in animations.iter() {
+        'outer: for (num, frame) in frames.iter().enumerate() {
+            for (index, (i, r)) in unique_images.iter().enumerate() {
+                if frame.image == animations.get_key_value(*r).unwrap().1[*i].image {
+                    skipped_frames.push((num, index, animation_name));
+                    continue 'outer;
+                }
+            }
+            let (x, y) = frame.image.dimensions();
+            dimensions += x * y + x * y / 6;
+            unique_images.push((num, animation_name));
+        }
+    }
+    let side = f64::from(dimensions).sqrt().round() as u32;
+    let config = TexturePackerConfig {
+        allow_rotation: false,
+        //texture_outlines: true,
+        max_width: side,
+        max_height: side,
+        texture_padding: 0,
+        force_max_dimensions: false,
+        ..Default::default()
+    };
+    let mut packer = TexturePacker::new_skyline(config);
+    for (i, (fr_num, a_name)) in unique_images.iter().enumerate() {
+        // here we killing image
+        packer
+            .pack_ref(
+                format!("{}", i),
+                animations.get_key_value(*a_name).unwrap().1[*fr_num]
+                    .image
+                    .borrow(),
+            )
+            .unwrap();
+    }
+    let mut unique_images_positions = Vec::new();
+    let frames = packer.get_frames();
+    for name in frames.keys().sorted() {
+        let b_rect = frames[name].frame;
+        unique_images_positions.push(Rect {
+            x: b_rect.x,
+            y: b_rect.y,
+            width: b_rect.w,
+            height: b_rect.h,
+        });
+    }
+    for (animation_name, frames) in animations.iter() {
+        out.insert(animation_name.clone(), Vec::new());
+        out.get_mut(animation_name)
+            .unwrap()
+            .resize_with(frames.len(), || EncodedFrameData {
+                location: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                },
+                offset: (0, 0),
+                frame_time: 0,
+                cleanup_rect: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                }),
+            });
+        for (num, frame) in frames.iter().enumerate() {
+            for i in skipped_frames.iter() {
+                if i.0 == num && i.2 == animation_name {
+                    out.get_mut(animation_name).unwrap()[num] = EncodedFrameData {
+                        location: unique_images_positions[i.1],
+                        offset: frame.offset,
+                        frame_time: frame.frame_time,
+                        cleanup_rect: frame.cleanup_rect,
+                    };
+                }
+            }
+            for (index, i) in unique_images.iter().enumerate() {
+                if i.0 == num && i.1 == animation_name {
+                    out.get_mut(animation_name).unwrap()[num] = EncodedFrameData {
+                        location: unique_images_positions[index],
+                        offset: frame.offset,
+                        frame_time: frame.frame_time,
+                        cleanup_rect: frame.cleanup_rect,
+                    };
+                }
+            }
+        }
+    }
+
+    return (ImageExporter::export(&packer, None).unwrap(), out);
+}
 
 fn main() {
     let args = Cli::parse();
     let folder_path = &args.folder_path;
+    let output_path = &args.output_path;
     if !folder_path.is_dir() {
         panic!("Folder path is not a directory!")
     }
+    let mut animations: HashMap<String, Vec<FrameData>> = HashMap::new();
     for entry in fs::read_dir(folder_path).unwrap() {
         let anim_path = entry.unwrap().path();
         println!("Working on {}", anim_path.display());
@@ -161,8 +295,45 @@ fn main() {
             println!("Path is not a forder. Skipping...");
             continue;
         }
-        let out = process_folder(anim_path);
+        animations.insert(
+            anim_path
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            process_folder(anim_path),
+        );
     }
-
-    //println!("{:?}", &character_forder);
+    println!("Packing animations...");
+    let (output_image, frame_data) = pack_animations(animations);
+    println!("Writing animations...");
+    output_image
+        .save(format!("{}output.png", output_path.to_str().unwrap()))
+        .unwrap();
+    println!("Writing metadata...");
+    let mut file =
+        fs::File::create(format!("{}metadata.json", output_path.to_str().unwrap())).unwrap();
+    file.write(b"{\n\"animations\": {\n").unwrap();
+    let mut c = false;
+    for (anim_name, data) in frame_data {
+        if c {
+            file.write(b",\n").unwrap();
+        }
+        file.write(format!("\"{}\":\n [", anim_name).as_bytes())
+            .unwrap();
+        let mut c2 = false;
+        for i in data {
+            if c2 {
+                file.write(b",\n").unwrap();
+            }
+            file.write(format!("{}", i).as_bytes()).unwrap();
+            c2 = true
+        }
+        file.write("]".as_bytes()).unwrap();
+        c = true
+    }
+    file.write(b"\n}\n}").unwrap();
 }
