@@ -14,7 +14,7 @@ use texture_packer::{TexturePacker, TexturePackerConfig};
 #[derive(Parser)]
 struct Cli {
     folder_path: std::path::PathBuf,
-    #[arg(default_value = "./")]
+    #[arg(default_value = "~/")]
     output_path: std::path::PathBuf,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +33,7 @@ impl Display for Rect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{\n\"x\": {},\n\"y\": {},\n\"width\": {},\n\"height\": {}\n}}",
+            "{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}}",
             self.x, self.y, self.width, self.height
         )
     }
@@ -59,7 +59,7 @@ impl Display for EncodedFrameData {
             Some(rect) => rect.to_string(),
             None => "null".to_string(),
         };
-        write!(f, "{{\n\"location\": {},\n\"position\": {{\n\"x\": {}\n, \"y\": {}\n}},\n\"duration\": {},\n\"clear_rect\":{}\n}}", self.location, x, y, self.frame_time, ster)
+        write!(f, "{{\"location\":{},\"position\":{{\"x\":{},\"y\":{}}},\"duration\":{},\"clear_rect\":{}}}", self.location, x, y, self.frame_time, ster)
     }
 }
 fn generate_frame(
@@ -316,24 +316,24 @@ fn main() {
     println!("Writing metadata...");
     let mut file =
         fs::File::create(format!("{}metadata.json", output_path.to_str().unwrap())).unwrap();
-    file.write(b"{\n\"animations\": {\n").unwrap();
+    file.write(b"{\"animations\":{").unwrap();
     let mut c = false;
     for (anim_name, data) in frame_data {
         if c {
-            file.write(b",\n").unwrap();
+            file.write(b",").unwrap();
         }
-        file.write(format!("\"{}\":\n [", anim_name).as_bytes())
+        file.write(format!("\"{}\":{{\"frames\":[", anim_name).as_bytes())
             .unwrap();
         let mut c2 = false;
         for i in data {
             if c2 {
-                file.write(b",\n").unwrap();
+                file.write(b",").unwrap();
             }
             file.write(format!("{}", i).as_bytes()).unwrap();
             c2 = true
         }
-        file.write("]".as_bytes()).unwrap();
+        file.write(b"],\"frame_rate\":24}}").unwrap();
         c = true
     }
-    file.write(b"\n}\n}").unwrap();
+    file.write(b"}").unwrap();
 }
