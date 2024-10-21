@@ -14,7 +14,7 @@ use texture_packer::{TexturePacker, TexturePackerConfig};
 #[derive(Parser)]
 struct Cli {
     folder_path: std::path::PathBuf,
-    #[arg(default_value = "~/")]
+    #[arg(default_value = "./")]
     output_path: std::path::PathBuf,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
