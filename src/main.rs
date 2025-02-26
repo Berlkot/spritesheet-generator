@@ -34,7 +34,7 @@ impl Display for Rect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}}",
+            "{{\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}",
             self.x, self.y, self.width, self.height
         )
     }
@@ -45,6 +45,7 @@ struct FrameData {
     offset: (u32, u32),
     frame_time: u32,
     cleanup_rect: Option<Rect>,
+    bounds_rect: Rect,
 }
 #[derive(Debug)]
 struct EncodedFrameData {
@@ -52,6 +53,7 @@ struct EncodedFrameData {
     offset: (u32, u32),
     frame_time: u32,
     cleanup_rect: Option<Rect>,
+    bounds_rect: Rect,
 }
 impl Display for EncodedFrameData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -60,7 +62,7 @@ impl Display for EncodedFrameData {
             Some(rect) => rect.to_string(),
             None => "null".to_string(),
         };
-        write!(f, "{{\"location\":{},\"position\":{{\"x\":{},\"y\":{}}},\"duration\":{},\"clear_rect\":{}}}", self.location, x, y, self.frame_time, ster)
+        write!(f, "{{\"location\":{},\"position\":{{\"x\":{},\"y\":{}}},\"duration\":{},\"clear_rect\":{},\"render_bounds\":{}}}", self.location, x, y, self.frame_time, ster, self.bounds_rect)
     }
 }
 fn generate_frame(
@@ -144,11 +146,14 @@ fn get_bounding_rect(image: &DynamicImage) -> Rect {
     }
     return out_rect;
 }
-fn process_folder(path: std::path::PathBuf) -> Vec<FrameData> {
+fn process_folder(path: std::path::PathBuf) -> (Vec<FrameData>, u32, u32, usize) {
     let mut rendered_frames: DynamicImage = DynamicImage::ImageRgba8(RgbaImage::new(0, 0));
     let mut out: Vec<FrameData> = Vec::new();
     let mut entries: Vec<DirEntry> = fs::read_dir(path).unwrap().map(|r| r.unwrap()).collect();
     entries.sort_by_key(|dir| dir.path());
+    let mut anim_width: u32 = 0;
+    let mut anim_height: u32 = 0;
+    let anim_length: usize = entries.len();
     for images_entry in entries {
         let image = DynamicImage::ImageRgba8(
             ImageReader::open(images_entry.path())
@@ -157,20 +162,25 @@ fn process_folder(path: std::path::PathBuf) -> Vec<FrameData> {
                 .unwrap()
                 .to_rgba8(),
         );
+        anim_width = image.width();
+        anim_height = image.height();
         if out.len() == 0 {
             rendered_frames = image.clone();
             let rect = get_bounding_rect(&image);
+            let bounds_rect = get_bounding_rect(&image);
             out.push(FrameData {
                 image: image.crop_imm(rect.x, rect.y, rect.width, rect.height),
                 offset: (rect.x, rect.y),
                 frame_time: 1,
                 cleanup_rect: None,
+                bounds_rect
             });
         } else if image == rendered_frames {
             out.last_mut().unwrap().frame_time += 1
         } else {
             let (clear_rect, fr, save_img) = generate_frame(&rendered_frames, &image);
             let rect = get_bounding_rect(&save_img);
+            let bounds_rect = get_bounding_rect(&fr);
             out.push(FrameData {
                 image: save_img.crop_imm(rect.x, rect.y, rect.width, rect.height),
                 offset: (rect.x, rect.y),
@@ -186,24 +196,25 @@ fn process_folder(path: std::path::PathBuf) -> Vec<FrameData> {
                 } else {
                     Some(clear_rect)
                 },
+                bounds_rect,
             });
             rendered_frames = fr;
         }
     }
-    return out;
+    return (out, anim_width, anim_height, anim_length);
 }
 
 fn pack_animations(
-    animations: HashMap<String, Vec<FrameData>>,
+    animations: &HashMap<String, (Vec<FrameData>, u32, u32, usize)>,
 ) -> (DynamicImage, HashMap<String, Vec<EncodedFrameData>>) {
     let mut unique_images: Vec<(usize, &String)> = Vec::new();
     let mut skipped_frames: Vec<(usize, usize, &String)> = Vec::new();
     let mut out: HashMap<String, Vec<EncodedFrameData>> = HashMap::new();
     let mut dimensions: u32 = 0;
-    for (animation_name, frames) in animations.iter() {
+    for (animation_name, (frames, ..)) in animations.iter() {
         'outer: for (num, frame) in frames.iter().enumerate() {
             for (index, (i, r)) in unique_images.iter().enumerate() {
-                if frame.image == animations.get_key_value(*r).unwrap().1[*i].image {
+                if frame.image == animations.get_key_value(*r).unwrap().1.0[*i].image {
                     skipped_frames.push((num, index, animation_name));
                     continue 'outer;
                 }
@@ -230,7 +241,7 @@ fn pack_animations(
         packer
             .pack_ref(
                 format!("{:0>8}", i),
-                animations.get_key_value(*a_name).unwrap().1[*fr_num]
+                animations.get_key_value(*a_name).unwrap().1.0[*fr_num]
                     .image
                     .borrow(),
             )
@@ -247,7 +258,7 @@ fn pack_animations(
             height: b_rect.h,
         });
     }
-    for (animation_name, frames) in animations.iter() {
+    for (animation_name, (frames, ..)) in animations.iter() {
         out.insert(animation_name.clone(), Vec::new());
         out.get_mut(animation_name)
             .unwrap()
@@ -266,6 +277,12 @@ fn pack_animations(
                     width: 0,
                     height: 0,
                 }),
+                bounds_rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                },
             });
         for (num, frame) in frames.iter().enumerate() {
             for i in skipped_frames.iter() {
@@ -275,6 +292,7 @@ fn pack_animations(
                         offset: frame.offset,
                         frame_time: frame.frame_time,
                         cleanup_rect: frame.cleanup_rect,
+                        bounds_rect: frame.bounds_rect
                     };
                 }
             }
@@ -285,6 +303,7 @@ fn pack_animations(
                         offset: frame.offset,
                         frame_time: frame.frame_time,
                         cleanup_rect: frame.cleanup_rect,
+                        bounds_rect: frame.bounds_rect
                     };
                 }
             }
@@ -301,8 +320,7 @@ fn main() {
     if !folder_path.is_dir() {
         panic!("Folder path is not a directory!")
     }
-    let mut animations: HashMap<String, Vec<FrameData>> = HashMap::new();
-    let mut animations_sizes: HashMap<String, (u32, u32)> = HashMap::new();
+    let mut animations: HashMap<String, (Vec<FrameData>, u32, u32, usize)> = HashMap::new();
     for entry in fs::read_dir(folder_path).unwrap() {
         let anim_path = entry.unwrap().path();
 
@@ -322,31 +340,9 @@ fn main() {
                 .to_owned(),
             process_folder(anim_path.clone()),
         );
-        let image_saple = ImageReader::open(
-            fs::read_dir(&anim_path)
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path(),
-        )
-        .unwrap()
-        .decode()
-        .unwrap();
-        animations_sizes.insert(
-            anim_path
-                .components()
-                .last()
-                .unwrap()
-                .as_os_str()
-                .to_str()
-                .unwrap()
-                .to_owned(),
-            (image_saple.width(), image_saple.height()),
-        );
     }
     println!("Packing animations...");
-    let (output_image, frame_data) = pack_animations(animations);
+    let (output_image, frame_data) = pack_animations(&animations);
     println!("Writing animations...");
     output_image
         .save(format!("{}output.png", output_path.to_str().unwrap()))
@@ -372,8 +368,8 @@ fn main() {
         }
         file.write(
             format!(
-                "],\"frame_rate\":24,\"width\":{},\"height\":{}}}}}",
-                animations_sizes[&anim_name].0, animations_sizes[&anim_name].1
+                "],\"frame_rate\":24,\"width\":{},\"height\":{},\"length\":{}}}}}",
+                animations[&anim_name].1, animations[&anim_name].2, animations[&anim_name].3
             )
             .as_bytes(),
         )
