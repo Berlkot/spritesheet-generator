@@ -1,5 +1,6 @@
 use clap::Parser;
 use core::panic;
+use std::fs::DirEntry;
 use image::{DynamicImage, GenericImage, GenericImageView, ImageReader, RgbaImage};
 use itertools::Itertools;
 use std::borrow::Borrow;
@@ -146,9 +147,11 @@ fn get_bounding_rect(image: &DynamicImage) -> Rect {
 fn process_folder(path: std::path::PathBuf) -> Vec<FrameData> {
     let mut rendered_frames: DynamicImage = DynamicImage::ImageRgba8(RgbaImage::new(0, 0));
     let mut out: Vec<FrameData> = Vec::new();
-    for images_entry in fs::read_dir(path).unwrap() {
+    let mut entries: Vec<DirEntry> = fs::read_dir(path).unwrap().map(|r| r.unwrap()).collect();
+    entries.sort_by_key(|dir| dir.path());
+    for images_entry in entries {
         let image = DynamicImage::ImageRgba8(
-            ImageReader::open(images_entry.unwrap().path())
+            ImageReader::open(images_entry.path())
                 .unwrap()
                 .decode()
                 .unwrap()
@@ -172,7 +175,17 @@ fn process_folder(path: std::path::PathBuf) -> Vec<FrameData> {
                 image: save_img.crop_imm(rect.x, rect.y, rect.width, rect.height),
                 offset: (rect.x, rect.y),
                 frame_time: 1,
-                cleanup_rect: if clear_rect == (Rect{x: 0, y: 0, width: 0, height: 0}){ None } else {Some(clear_rect)},
+                cleanup_rect: if clear_rect
+                    == (Rect {
+                        x: 0,
+                        y: 0,
+                        width: 0,
+                        height: 0,
+                    }) {
+                    None
+                } else {
+                    Some(clear_rect)
+                },
             });
             rendered_frames = fr;
         }
@@ -196,7 +209,7 @@ fn pack_animations(
                 }
             }
             let (x, y) = frame.image.dimensions();
-            dimensions += x * y + x * y / 6;
+            dimensions += x * y + x * y;
             unique_images.push((num, animation_name));
         }
     }
@@ -208,6 +221,7 @@ fn pack_animations(
         max_height: side,
         texture_padding: 0,
         force_max_dimensions: false,
+        trim: false,
         ..Default::default()
     };
     let mut packer = TexturePacker::new_skyline(config);
@@ -215,7 +229,7 @@ fn pack_animations(
         // here we killing image
         packer
             .pack_ref(
-                format!("{}", i),
+                format!("{:0>8}", i),
                 animations.get_key_value(*a_name).unwrap().1[*fr_num]
                     .image
                     .borrow(),
@@ -288,8 +302,10 @@ fn main() {
         panic!("Folder path is not a directory!")
     }
     let mut animations: HashMap<String, Vec<FrameData>> = HashMap::new();
+    let mut animations_sizes: HashMap<String, (u32, u32)> = HashMap::new();
     for entry in fs::read_dir(folder_path).unwrap() {
         let anim_path = entry.unwrap().path();
+
         println!("Working on {}", anim_path.display());
         if !anim_path.is_dir() {
             println!("Path is not a forder. Skipping...");
@@ -304,7 +320,29 @@ fn main() {
                 .to_str()
                 .unwrap()
                 .to_owned(),
-            process_folder(anim_path),
+            process_folder(anim_path.clone()),
+        );
+        let image_saple = ImageReader::open(
+            fs::read_dir(&anim_path)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap()
+        .decode()
+        .unwrap();
+        animations_sizes.insert(
+            anim_path
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            (image_saple.width(), image_saple.height()),
         );
     }
     println!("Packing animations...");
@@ -332,7 +370,14 @@ fn main() {
             file.write(format!("{}", i).as_bytes()).unwrap();
             c2 = true
         }
-        file.write(b"],\"frame_rate\":24}}").unwrap();
+        file.write(
+            format!(
+                "],\"frame_rate\":24,\"width\":{},\"height\":{}}}}}",
+                animations_sizes[&anim_name].0, animations_sizes[&anim_name].1
+            )
+            .as_bytes(),
+        )
+        .unwrap();
         c = true
     }
     file.write(b"}").unwrap();
